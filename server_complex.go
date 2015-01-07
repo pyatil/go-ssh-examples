@@ -33,6 +33,24 @@ var (
 	DEFAULT_SHELL string = "sh"
 )
 
+type exitStatusMsg struct {
+	Status uint32
+}
+
+func exitStatus(err error) (exitStatusMsg, error) {
+	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			// There is no platform independent way to retrieve
+			// the exit code, but the following will work on Unix
+			if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
+				return exitStatusMsg{uint32(status.ExitStatus())}, nil
+			}
+		}
+		return exitStatusMsg{0}, err
+	}
+	return exitStatusMsg{0}, nil
+}
+
 func main() {
 	// An SSH server is represented by a ServerConfig, which holds
 	// certificate details and handles authentication of ServerConns.
@@ -146,6 +164,7 @@ func handleChannels(chans <-chan ssh.NewChannel) {
 				case "exec":
 					ok = true
 					command := string(req.Payload[4 : req.Payload[3]+4])
+					log.Printf("%s", command)
 					cmd := exec.Command(shell, []string{"-c", command}...)
 
 					cmd.Stdout = channel
@@ -157,29 +176,30 @@ func handleChannels(chans <-chan ssh.NewChannel) {
 						log.Printf("could not start command (%s)", err)
 						continue
 					}
-
 					// teardown session
 					go func() {
-						_, err := cmd.Process.Wait()
+						status, err := exitStatus(cmd.Wait())
 						if err != nil {
 							log.Printf("failed to exit bash (%s)", err)
 						}
+						// false for command executed and didn't need connect more.
+						channel.SendRequest("exit-status", false, ssh.Marshal(&status))
 						channel.Close()
-						log.Printf("session closed")
+						log.Printf("exec: session closed")
 					}()
 				case "shell":
 					cmd := exec.Command(shell)
 					cmd.Env = []string{"TERM=xterm"}
 					err := PtyRun(cmd, tty)
 					if err != nil {
-						log.Printf("%s", err)
+						log.Printf("PtyRun Error: %s", err)
 					}
 
 					// Teardown session
 					var once sync.Once
 					close := func() {
 						channel.Close()
-						log.Printf("session closed")
+						log.Printf("PtyRun: session closed")
 					}
 
 					// Pipe session to bash and visa-versa
